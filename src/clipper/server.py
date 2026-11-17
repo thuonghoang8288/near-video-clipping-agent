@@ -149,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(202, {"job_id": job_id, "status": "running"})
 
 
-def serve(host: str = "127.0.0.1", port: int = 8080) -> None:
+def serve(host: str = "0.0.0.0", port: int = 8080) -> None:
     os.makedirs(OUT_DIR, exist_ok=True)
     print(f"clipper API on http://{host}:{port} (out dir: {OUT_DIR})")
     ThreadingHTTPServer((host, port), Handler).serve_forever()
