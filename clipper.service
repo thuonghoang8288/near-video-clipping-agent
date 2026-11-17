@@ -1,0 +1,23 @@
+# Video Clipping Agent — systemd unit for an Oracle Always Free Ampere VM
+# (Ubuntu 22.04/24.04 ARM). Assumes the repo is at /opt/clipper and a venv
+# exists there. Run: sudo cp clipper.service /etc/systemd/system/ &&
+# sudo systemctl daemon-reload && sudo systemctl enable --now clipper
+[Unit]
+Description=Video Clipping Agent API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/clipper
+Environment=PYTHONPATH=/opt/clipper/src
+Environment=CLIPPER_OUT=/opt/clipper/out
+ExecStart=/opt/clipper/.venv/bin/python -m clipper.server 8080
+Restart=on-failure
+RestartSec=10
+# Keep the box from swapping itself to death on big jobs.
+MemoryMax=20G
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,4 @@
+faster-whisper>=1.0.0
+# Pin av: faster-whisper 1.2.1 calls av.open(..., metadata_errors="ignore"),
+# a kwarg PyAV 19 removed (av 19.0.2 raises TypeError). av 18.1.0 works.
+av==18.1.0
