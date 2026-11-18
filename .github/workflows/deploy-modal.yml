@@ -1,0 +1,47 @@
+name: Deploy clipper to Modal
+
+# The Modal CLI cannot run from this project's dev VM: the CLI talks
+# gRPC (HTTP/2) and the VM's egress proxy only allows HTTP/1.1, so
+# `modal deploy` fails there with "Could not connect to the Modal
+# server". GitHub runners have full internet access, so deploy runs here.
+#
+# Required repo secrets (Settings > Secrets and variables > Actions):
+#   MODAL_TOKEN_ID, MODAL_TOKEN_SECRET — Modal API token "clipper-deploy"
+#   CLIPPER_TOKEN — the clipper API auth token (never commit the value)
+on:
+  push:
+    branches: [main]
+    paths:
+      - "modal_app.py"
+      - "src/**"
+      - "requirements.txt"
+      - ".github/workflows/deploy-modal.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Modal CLI
+        run: pip install modal
+
+      - name: Create clipper-token secret (first run only)
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          CLIPPER_TOKEN: ${{ secrets.CLIPPER_TOKEN }}
+        run: |
+          modal secret create clipper-token "CLIPPER_TOKEN=$CLIPPER_TOKEN" \
+            || echo "clipper-token secret already exists, continuing"
+
+      - name: Deploy to Modal
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: modal deploy modal_app.py
