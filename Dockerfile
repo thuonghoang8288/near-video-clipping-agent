@@ -9,4 +9,4 @@ ENV PYTHONPATH=/app/src CLIPPER_OUT=/app/out
 EXPOSE 8080
 # Pre-download the whisper tiny model at build time so first requests are fast.
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('tiny', device='cpu', compute_type='int8')"
-CMD ["python", "-m", "clipper.server", "8080"]
+CMD ["sh", "-c", "python -m clipper.server ${PORT:-8080}"]

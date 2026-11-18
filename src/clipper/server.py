@@ -3,8 +3,14 @@
 Endpoints:
   GET  /health            -> {"ok": true}
   POST /clip             -> {"job_id": ...}  (JSON body; runs in background)
+  POST /clip-sync        -> manifest JSON when done (runs inline; for
+                            Cloud Run, whose CPU is throttled after the
+                            response — background jobs would stall)
   GET  /jobs/{id}        -> status + manifest + file list
   GET  /jobs/{id}/files/{name} -> download a clip / srt / report
+
+Auth: if env CLIPPER_TOKEN is set, POSTs to /clip and /clip-sync must
+carry header "X-Clipper-Token: <token>" or they get 401.
 
 POST /clip body:
   {
@@ -33,7 +39,10 @@ from .pipeline import run
 
 OUT_DIR = os.environ.get("CLIPPER_OUT", "out")
 MAX_CLIPS = 10
-MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+# Cloud Run container disk counts against the 4 GiB memory limit, so cap
+# sources at 500 MB (was 2 GB on a plain VM).
+MAX_SOURCE_BYTES = 500 * 1024 * 1024  # 500 MB
+CLIPPER_TOKEN = os.environ.get("CLIPPER_TOKEN", "")
 
 JOBS: dict = {}
 LOCK = threading.Lock()
@@ -53,7 +62,8 @@ def _fetch_source(url: str, dest: str) -> None:
                 break
             total += len(chunk)
             if total > MAX_SOURCE_BYTES:
-                raise ValueError("source larger than 2 GB")
+                raise ValueError(
+                    f"source larger than {MAX_SOURCE_BYTES // (1024 * 1024)} MB")
             fh.write(chunk)
 
 
@@ -110,41 +120,93 @@ class Handler(BaseHTTPRequestHandler):
                 return
         return self._json(404, {"error": "not found"})
 
-    def do_POST(self):
-        if urlparse(self.path).path != "/clip":
-            return self._json(404, {"error": "not found"})
+    def _authorized(self) -> bool:
+        """Shared-secret auth for POSTs. No token configured = open (local use)."""
+        if not CLIPPER_TOKEN:
+            return True
+        return self.headers.get("X-Clipper-Token") == CLIPPER_TOKEN
+
+    def _parse_clip_body(self) -> tuple[dict | None, tuple[int, dict] | None]:
+        """Parse + validate a /clip request body.
+
+        Returns (params, None) on success or (None, (http_code, error_obj)).
+        """
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
         except Exception:
-            return self._json(400, {"error": "invalid JSON"})
+            return None, (400, {"error": "invalid JSON"})
         url = body.get("source_url", "")
         if not urlparse(url).scheme.startswith("http"):
-            return self._json(400, {"error": "source_url must be a public http(s) URL"})
+            return None, (400, {"error": "source_url must be a public http(s) URL"})
         clips = int(body.get("clips", 5))
         if not 1 <= clips <= MAX_CLIPS:
-            return self._json(400, {"error": "clips must be 1..10"})
+            return None, (400, {"error": "clips must be 1..10"})
         formats = body.get("formats", ["vertical"])
         if not formats or any(f not in ("vertical", "square", "landscape") for f in formats):
-            return self._json(400, {"error": "bad formats"})
+            return None, (400, {"error": "bad formats"})
+        return {
+            "source_url": url,
+            "clips": clips,
+            "formats": formats,
+            "captions": bool(body.get("captions", True)),
+            "language": body.get("language"),
+        }, None
+
+    def _start_job(self, params: dict) -> tuple[str, str]:
+        """Create a job entry + fetch its source. Returns (job_id, src_path)."""
         job_id = _new_job_id()
         job_dir = os.path.join(OUT_DIR, job_id)
         os.makedirs(job_dir, exist_ok=True)
         with LOCK:
             JOBS[job_id] = {"job_id": job_id, "status": "fetching",
-                            "source_url": url}
-        src_path = os.path.join(job_dir, "source" + os.path.splitext(urlparse(url).path)[1][:5])
+                            "source_url": params["source_url"]}
+        url = params["source_url"]
+        src_path = os.path.join(
+            job_dir, "source" + os.path.splitext(urlparse(url).path)[1][:5])
+        _fetch_source(url, src_path)
+        return job_id, src_path
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path not in ("/clip", "/clip-sync"):
+            return self._json(404, {"error": "not found"})
+        if not self._authorized():
+            return self._json(401, {"error": "unauthorized"})
+        params, err = self._parse_clip_body()
+        if err is not None:
+            code, obj = err
+            return self._json(code, obj)
         try:
-            _fetch_source(url, src_path)
+            job_id, src_path = self._start_job(params)
         except Exception as exc:  # noqa: BLE001
+            return self._json(400, {"error": f"fetch failed: {exc}"})
+        if path == "/clip-sync":
+            # Synchronous: run inline so Cloud Run does not throttle the
+            # CPU after the response (background jobs would stall there).
             with LOCK:
-                JOBS[job_id].update({"status": "error", "error": f"fetch failed: {exc}"})
-            return self._json(200, {"job_id": job_id, "status": "error"})
+                JOBS[job_id]["status"] = "running"
+            try:
+                manifest = run(src_path, os.path.join(OUT_DIR, job_id),
+                               clip_count=params["clips"],
+                               formats=tuple(params["formats"]),
+                               captions=params["captions"],
+                               language=params["language"])
+            except Exception as exc:  # noqa: BLE001 - surfaced in response
+                with LOCK:
+                    JOBS[job_id].update({"status": "error", "error": str(exc)})
+                return self._json(500, {"job_id": job_id, "status": "error",
+                                        "error": str(exc)})
+            with LOCK:
+                JOBS[job_id].update({"status": "done", "manifest": manifest})
+            return self._json(200, {"job_id": job_id, "status": "done",
+                                    "manifest": manifest})
+        # Async (local / plain-VM use): background thread, 202 immediately.
         with LOCK:
             JOBS[job_id]["status"] = "running"
         threading.Thread(target=_worker, args=(
-            job_id, src_path, clips, formats,
-            bool(body.get("captions", True)), body.get("language"),
+            job_id, src_path, params["clips"], params["formats"],
+            params["captions"], params["language"],
         ), daemon=True).start()
         return self._json(202, {"job_id": job_id, "status": "running"})
 

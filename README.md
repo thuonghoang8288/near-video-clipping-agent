@@ -64,8 +64,17 @@ CLIPPER_OUT=out .venv/bin/python -m clipper.server 8080
 - `GET /health`
 - `POST /clip` — `{"source_url": "https://.../video.mp4", "clips": 5,
   "formats": ["vertical"], "captions": true, "language": "en"}` → `{"job_id": ...}`
+  (async: 202, job runs in the background)
+- `POST /clip-sync` — same body, runs the job inline and returns
+  `{"job_id": ..., "status": "done", "manifest": ...}` when finished.
+  Use this on Cloud Run (CPU is throttled after the response, so
+  background jobs would stall).
 - `GET /jobs/{id}` — status + manifest
 - `GET /jobs/{id}/files/{name}` — download a clip / SRT / report
+
+Auth: if env `CLIPPER_TOKEN` is set, POSTs to `/clip` and `/clip-sync`
+must send header `X-Clipper-Token: <token>` (otherwise 401). The Docker
+image listens on `$PORT` (default 8080). Sources are capped at 500 MB.
 
 ## How clips are chosen (transparent scoring)
 
