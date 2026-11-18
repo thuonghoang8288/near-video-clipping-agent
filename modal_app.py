@@ -28,13 +28,17 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("ffmpeg")
     .pip_install_from_requirements(str(ROOT / "requirements.txt"))
-    .add_local_dir(str(ROOT / "src"), remote_path="/root/clipper")
     # Pre-download the whisper tiny model at image-build time so the
     # first request does not pay the download.
+    # NOTE: Modal forbids any build step (run_commands, pip_install,
+    # apt_install) AFTER an add_local_* call, so ALL build steps must
+    # come before .add_local_dir() below. The first deploy failed on
+    # exactly this: run_commands() sat after add_local_dir().
     .run_commands(
         "python -c \"from faster_whisper import WhisperModel; "
         "WhisperModel('tiny', device='cpu', compute_type='int8')\""
     )
+    .add_local_dir(str(ROOT / "src"), remote_path="/root/clipper")
 )
 
 app = modal.App("near-clipper")
